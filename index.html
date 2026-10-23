@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Absensi</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #0f172a);
+    --fg: var(--tg-theme-text-color, #f1f5f9);
+    --muted: var(--tg-theme-hint-color, #94a3b8);
+    --card: var(--tg-theme-secondary-bg-color, #1e293b);
+    --accent: var(--tg-theme-button-color, #2563eb);
+    --accent-fg: var(--tg-theme-button-text-color, #ffffff);
+    --ok: #16a34a; --bad: #dc2626; --warn: #d97706;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 480px; margin: 0 auto; padding: 16px 16px 28px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--card); color: var(--muted); }
+  .clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .stage { position: relative; width: 100%; aspect-ratio: 3 / 4; border-radius: 18px; overflow: hidden; background: #000; }
+  video, #shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  video { transform: scaleX(-1); }
+  #shot { display: none; }
+  .count { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 96px; font-weight: 700;
+           color: #fff; text-shadow: 0 4px 24px rgba(0,0,0,.6); pointer-events: none; }
+  .flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .ring { position: absolute; left: 50%; top: 44%; width: 62%; aspect-ratio: 3/4; transform: translate(-50%, -50%);
+          border: 3px dashed rgba(255,255,255,.55); border-radius: 50%; pointer-events: none; }
+  ol.steps { list-style: none; padding: 0; margin: 14px 0 0; display: grid; gap: 6px; }
+  ol.steps li { display: flex; gap: 10px; align-items: center; padding: 9px 12px; border-radius: 12px; background: var(--card); color: var(--muted); }
+  ol.steps li .ic { width: 22px; text-align: center; }
+  ol.steps li.on { color: var(--fg); }
+  ol.steps li.done { color: var(--fg); }
+  ol.steps li.done .ic, ol.steps li.err .ic { font-size: 0; }
+  ol.steps li.done .ic::before { content: "✅"; font-size: 15px; }
+  ol.steps li.err .ic::before { content: "⚠️"; font-size: 15px; }
+  .msg { margin-top: 14px; padding: 12px 14px; border-radius: 12px; background: var(--card); white-space: pre-line; display: none; }
+  .msg.ok { border-left: 4px solid var(--ok); } .msg.bad { border-left: 4px solid var(--bad); } .msg.warn { border-left: 4px solid var(--warn); }
+  button { appearance: none; border: 0; border-radius: 12px; padding: 12px 16px; font: inherit; font-weight: 600; width: 100%; margin-top: 10px;
+           background: var(--accent); color: var(--accent-fg); display: none; }
+  button.ghost { background: var(--card); color: var(--fg); }
+  .note { margin-top: 12px; font-size: 12px; color: var(--muted); }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1 id="title">Absen</h1><span class="pill" id="who">Telegram</span></header>
+  <div class="clock" id="clock">—</div>
+  <div class="stage">
+    <video id="cam" playsinline autoplay muted></video>
+    <img id="shot" alt="Foto absen">
+    <div class="ring" id="ring"></div>
+    <div class="count" id="count"></div>
+    <div class="flash" id="flash"></div>
+  </div>
+  <ol class="steps">
+    <li id="s1"><span class="ic">📷</span>Kamera depan</li>
+    <li id="s2"><span class="ic">⏱</span>Foto otomatis (5 detik)</li>
+    <li id="s3"><span class="ic">📍</span>Lokasi</li>
+    <li id="s4"><span class="ic">📤</span>Kirim absen</li>
+  </ol>
+  <div class="msg" id="msg"></div>
+  <button id="retryCam">Ulangi foto</button>
+  <button id="fileBtn">📸 Buka kamera HP</button>
+  <button id="retryLoc">📍 Coba ambil lokasi lagi</button>
+  <button id="locSet" class="ghost">⚙️ Buka izin lokasi</button>
+  <button id="closeBtn" class="ghost">Tutup</button>
+  <input type="file" id="file" accept="image/*" capture="user">
+  <p class="note">Tanggal & jam dicatat oleh server saat absen dikirim. Foto dan lokasi hanya dipakai untuk absensi.</p>
+</main>
+<script>
+(function () {
+  'use strict';
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var q = new URLSearchParams(location.search);
+  var JENIS = (q.get('j') || '').toUpperCase() === 'PULANG' ? 'PULANG' : 'MASUK';
+  var TOKEN = q.get('t') || '';
+  var API = q.get('api') || '';
+  var COUNT = 5, MAXW = 720;
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { foto: '', cam: 'live', loc: null, sent: false };
+  var HARI = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  function stamp(d) { return HARI[d.getDay()] + ', ' + pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear() + ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()); }
+
+  if (tg) { try { tg.ready(); tg.expand(); if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); } catch (e) {} }
+  $('title').textContent = (JENIS === 'MASUK' ? '🟢 Absen Masuk' : '🔴 Absen Pulang');
+  try { var u = tg && tg.initDataUnsafe && tg.initDataUnsafe.user; if (u && u.first_name) $('who').textContent = u.first_name; } catch (e) {}
+  setInterval(function () { $('clock').textContent = stamp(new Date()); }, 500);
+
+  function step(id, cls) { var el = $(id); el.classList.remove('on', 'done', 'err'); if (cls) el.classList.add(cls); }
+  function show(id, on) { $(id).style.display = on ? 'block' : 'none'; }
+  function say(text, kind) { var m = $('msg'); m.textContent = text; m.className = 'msg ' + (kind || ''); m.style.display = text ? 'block' : 'none'; }
+  function haptic(t) { try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(t); } catch (e) {} }
+
+  // keamanan: hanya kirim ke Web App Google Apps Script
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(API) || !/^\d+\.[0-9a-f]{20}$/.test(TOKEN)) {
+    say('Link absen tidak valid. Buka lagi dari tombol absen di bot Telegram.', 'bad'); show('closeBtn', true); return;
+  }
+
+  // ---------- 1-2. kamera + hitung mundur + foto ----------
+  var stream = null, timer = null;
+  function startCam() {
+    say(''); show('retryCam', false); show('fileBtn', false);
+    $('shot').style.display = 'none'; $('cam').style.display = 'block'; $('ring').style.display = 'block';
+    step('s1', 'on'); step('s2'); step('s3'); step('s4');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return camFail();
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 1280 } }, audio: false })
+      .then(function (s) {
+        stream = s; var v = $('cam'); v.srcObject = s;
+        var go = function () { step('s1', 'done'); step('s2', 'on'); countdown(COUNT); };
+        if (v.readyState >= 2) go(); else v.onloadeddata = go;
+        v.play && v.play().catch(function () {});
+      })
+      .catch(camFail);
+  }
+  function camFail() {
+    step('s1', 'err');
+    say('Kamera tidak bisa dibuka otomatis di HP ini.\nTekan tombol di bawah untuk membuka kamera HP.', 'warn');
+    show('fileBtn', true);
+  }
+  function countdown(n) {
+    $('count').textContent = n;
+    if (n <= 0) { $('count').textContent = ''; return capture($('cam'), true); }
+    timer = setTimeout(function () { countdown(n - 1); }, 1000);
+  }
+  function capture(src, mirrored) {
+    var w = src.videoWidth || src.naturalWidth, h = src.videoHeight || src.naturalHeight;
+    if (!w || !h) { step('s2', 'err'); say('Foto gagal diambil. Coba lagi.', 'bad'); show('retryCam', true); return; }
+    var sc = Math.min(1, MAXW / w), c = document.createElement('canvas');
+    c.width = Math.round(w * sc); c.height = Math.round(h * sc);
+    var x = c.getContext('2d');
+    if (mirrored) { x.translate(c.width, 0); x.scale(-1, 1); }
+    x.drawImage(src, 0, 0, c.width, c.height);
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    // cap waktu di foto (jam perangkat; jam resmi dicatat server)
+    var t = 'Absen ' + JENIS + ' · ' + stamp(new Date()), fs = Math.max(14, Math.round(c.width / 28));
+    x.fillStyle = 'rgba(0,0,0,.55)'; x.fillRect(0, c.height - fs * 2, c.width, fs * 2);
+    x.fillStyle = '#fff'; x.font = '600 ' + fs + 'px system-ui, sans-serif'; x.textBaseline = 'middle';
+    x.fillText(t, fs * 0.6, c.height - fs);
+    state.foto = c.toDataURL('image/jpeg', 0.8).split(',')[1];
+    if (stream) { stream.getTracks().forEach(function (k) { k.stop(); }); stream = null; }
+    $('flash').style.opacity = 1; setTimeout(function () { $('flash').style.opacity = 0; }, 180);
+    $('shot').src = 'data:image/jpeg;base64,' + state.foto; $('shot').style.display = 'block';
+    $('cam').style.display = 'none'; $('ring').style.display = 'none';
+    step('s1', 'done'); step('s2', 'done'); haptic('success');
+    getLoc();
+  }
+  $('fileBtn').onclick = function () { $('file').click(); };
+  $('file').onchange = function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    var img = new Image();
+    img.onload = function () { state.cam = 'file'; show('fileBtn', false); say(''); capture(img, false); URL.revokeObjectURL(img.src); };
+    img.src = URL.createObjectURL(f);
+  };
+  $('retryCam').onclick = startCam;
+
+  // ---------- 3. lokasi (Telegram LocationManager, cadangan: GPS browser) ----------
+  function getLoc() {
+    step('s3', 'on'); say('Mengambil lokasi…'); show('retryLoc', false); show('locSet', false);
+    var LM = tg && tg.LocationManager;
+    var useBrowser = function () {
+      if (!navigator.geolocation) return locFail('Perangkat tidak mendukung lokasi.');
+      navigator.geolocation.getCurrentPosition(function (p) {
+        gotLoc({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy, src: 'browser' });
+      }, function (e) { locFail(e && e.code === 1 ? 'Izin lokasi ditolak. Aktifkan izin lokasi untuk Telegram, lalu coba lagi.' : 'Lokasi belum didapat (GPS lemah). Coba lagi di tempat terbuka.'); },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    };
+    if (LM && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+      var ask = function () {
+        if (!LM.isLocationAvailable) return useBrowser();
+        LM.getLocation(function (d) {
+          if (d && typeof d.latitude === 'number') return gotLoc({ lat: d.latitude, lon: d.longitude, acc: d.horizontal_accuracy || '', src: 'telegram' });
+          if (LM.isAccessRequested && !LM.isAccessGranted) { show('locSet', true); return locFail('Izin lokasi untuk bot ini belum diberikan.'); }
+          useBrowser();
+        });
+      };
+      try { LM.isInited ? ask() : LM.init(ask); } catch (e) { useBrowser(); }
+    } else useBrowser();
+  }
+  function locFail(t) { step('s3', 'err'); say(t, 'bad'); show('retryLoc', true); haptic('error'); }
+  function gotLoc(l) { state.loc = l; step('s3', 'done'); say(''); send(); }
+  $('retryLoc').onclick = getLoc;
+  $('locSet').onclick = function () { try { tg.LocationManager.openSettings(); } catch (e) {} };
+
+  // ---------- 4. kirim ke server, lalu konfirmasi lewat Telegram (sendData) ----------
+  function send() {
+    if (state.sent) return;
+    step('s4', 'on'); say('Mengirim absen…');
+    var body = JSON.stringify({ t: TOKEN, j: JENIS, f: state.foto, lat: state.loc.lat, lon: state.loc.lon, acc: state.loc.acc, src: state.loc.src, cam: state.cam,
+      dev: stamp(new Date()), plat: tg ? tg.platform : '' });
+    fetch(API + '?absen=1', { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body, redirect: 'follow' })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!res || !res.ok) { step('s4', 'err'); say((res && res.msg) || 'Absen gagal dikirim.', 'bad'); show('closeBtn', true); haptic('error'); return; }
+        state.sent = true; step('s4', 'done');
+        say(res.msg || 'Absen terkirim.', res.status === 'SAH' ? 'ok' : 'bad');
+        haptic(res.status === 'SAH' ? 'success' : 'warning');
+        // sendData membuktikan absen ini dikirim dari akun Telegram karyawan sendiri; aplikasi lalu tertutup
+        setTimeout(function () {
+          try { if (tg && tg.sendData) return tg.sendData(JSON.stringify({ absen: res.nonce })); } catch (e) {}
+          say((res.msg || '') + '\n\nBuka halaman ini dari tombol absen di Telegram agar absen tercatat.', 'warn');
+        }, res.status === 'SAH' ? 1200 : 2500);
+      })
+      .catch(function () { step('s4', 'err'); say('Tidak ada koneksi ke server. Periksa internet lalu coba lagi.', 'bad'); state.sent = false; show('retryLoc', true); });
+  }
+  $('closeBtn').onclick = function () { try { tg.close(); } catch (e) { window.close(); } };
+
+  startCam();
+})();
+</script>
+</body>
+</html>
